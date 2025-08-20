@@ -85,5 +85,5 @@ function shouldRandomTrigger(
 // 特殊消息类型判断
 function isSpecialMessage(session: Session): boolean {
   const firstElement = session.elements[0]
-  return ['img', 'at', 'file'].includes(firstElement?.type) || session.content.includes(':poke') || session.content.includes('file://') || session.content.includes('http://') || session.content.includes('https://')
+  return ['at', 'file'].includes(firstElement?.type) || session.content.includes(':poke') || session.content.includes('file://') || session.content.includes('http://') || session.content.includes('https://')
 }

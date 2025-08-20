@@ -1,4 +1,3 @@
-
 // src/api.ts
 import { Context, Logger } from 'koishi'
 import { trimSlash, isErrorWithMessage } from './utils'
@@ -18,27 +17,44 @@ export class APIClient {
   // 发送聊天请求
   public async chat(user: User, messages: Sat.Msg[]): Promise<{content:string, error: boolean}> {
     if(user.userid == 'Alice') return { content: '<p>(系统)这是一个测试句子。这个句子稍长一些，包含多个标点符号！这是一个特别长的句子，需要超过最大长度限制的句子应该被保留原样，但这种情况在实际使用中应该尽量避免。最后？这是一个需要合并的短句！;</p>', error: false }
+
+    const lastMessage = messages[messages.length - 1];
+    const hasImage = Array.isArray(lastMessage.content);
+
     const enableUserKey = user?.items?.['地灵殿通行证']?.description && user.items['地灵殿通行证'].description == 'on'
     let keys: string[]
-    let modle: string
+    let model: string
     let baseURL: string
-    if (enableUserKey) {
+
+    if (hasImage) {
+      // 路由到视觉模型
+      logger.info('检测到图片，使用视觉模型处理...');
+      if (!this.config.vision_LLM || !this.config.vision_LLM_URL || !this.config.vision_LLM_key) {
+        return { content: '视觉模型未配置，无法处理图片。', error: true };
+      }
+      keys = this.config.vision_LLM_key;
+      model = this.config.vision_LLM;
+      baseURL = this.config.vision_LLM_URL;
+    } else if (enableUserKey) {
+      // 用户自定义Key逻辑
       const ticket = user.items['地灵殿通行证'].metadata
       keys = [ticket?.key]
-      modle = ticket?.model
+      model = ticket?.model
       baseURL = ticket?.baseURL
       const not_reasoner_model = ticket?.not_reasoner_model
       const length = ticket?.use_not_reasoner_LLM_length
       if (not_reasoner_model && length && messages[messages.length - 1].content.length <= length)
-        modle = not_reasoner_model
+        model = not_reasoner_model
     } else {
+      // 原有文本模型逻辑
       const config = this.config;
       const useNotReasoner = messages[messages.length - 1].content.length <= config.use_not_reasoner_LLM_length;
       keys = useNotReasoner ? config.not_reasoner_LLM_key : config.keys;
-      modle = useNotReasoner ? config.not_reasoner_LLM : config.appointModel;
+      model = useNotReasoner ? config.not_reasoner_LLM : config.appointModel;
       baseURL = useNotReasoner ? config.not_reasoner_LLM_URL : config.baseURL;
     }
-    const payload = this.createPayload(messages, modle)
+
+    const payload = this.createPayload(messages, model)
     for (let i = 0; i < keys.length; i++) {
       try {
         return await this.tryRequest(baseURL, payload, keys)
@@ -79,19 +95,19 @@ export class APIClient {
     if(user.userid == 'Alice') return { content: '测试画像', error: false }
     const enableUserKey = user?.items?.['地灵殿通行证']?.description && user.items['地灵殿通行证'].description == 'on'
     let keys: string[]
-    let modle: string
+    let model: string
     let baseURL: string
     if (enableUserKey) {
       const key = user.items['地灵殿通行证'].metadata?.key
       keys = [key]
-      modle = user.items['地灵殿通行证'].metadata?.model
+      model = user.items['地灵殿通行证'].metadata?.model
       baseURL = user.items['地灵殿通行证'].metadata?.baseURL
     } else {
       keys = this.config.keys
-      modle = this.config.appointModel
+      model = this.config.appointModel
       baseURL = this.config.baseURL
     }
-    const payload = this.createAuxiliaryPayload(messages, modle)
+    const payload = this.createAuxiliaryPayload(messages, model)
     const url = `${trimSlash(baseURL)}/chat/completions`
     const headers = this.createHeaders(keys)
 
@@ -157,7 +173,9 @@ export class APIClient {
         const responseMsg:Sat.Msg = { role: 'assistant', content: content }
         if (payload.messages.some(msg => msg === responseMsg) && content.length > 5) {
           const lastMsg = payload.messages[payload.messages.length - 1]
-          payload.messages[payload.messages.length - 1].content = lastMsg.content + '(注意不要重复之前的内容)'
+          if(typeof lastMsg.content === 'string') {
+            payload.messages[payload.messages.length - 1].content = lastMsg.content + '(注意不要重复之前的内容)'
+          }
           logger.warn(`返回内容与之前内容相同，重试(第${i}次)中...`)
           continue
         }

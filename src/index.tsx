@@ -1,4 +1,4 @@
-// src/index.ts
+// src/index.tsx
 import { Context, Logger, Session, h } from 'koishi'
 import { } from '@koishijs/censor'
 import * as path from 'path'
@@ -80,7 +80,11 @@ export class SAT extends Sat {
       temperature: this.config.temperature,
       frequency_penalty: this.config.frequency_penalty,
       presence_penalty: this.config.presence_penalty,
-      reasoning_content: this.config.log_reasoning_content
+      reasoning_content: this.config.log_reasoning_content,
+      // 传入视觉模型配置
+      vision_LLM_URL: this.config.vision_LLM_URL,
+      vision_LLM_key: this.config.vision_LLM_key,
+      vision_LLM: this.config.vision_LLM,
     }
   }
   private getMemoryConfig(): MemoryConfig {
@@ -274,7 +278,8 @@ export class SAT extends Sat {
 
   // 前置检查
   private performPreChecks(session: Session, prompt: string): string {
-    if (!prompt || prompt.length == 0)
+    const hasImage = session.elements.some(el => el.type === 'img');
+    if (!prompt && !hasImage)
       return session.text('commands.sat.messages.no-prompt')
     if (prompt.length > this.config.max_tokens)
       return session.text('commands.sat.messages.tooLong')
@@ -400,8 +405,20 @@ export class SAT extends Sat {
     const userMemory = this.memoryManager.getChannelContext(this.config.personal_memory ? session.userId : session.channelId)
     messages.push(...userMemory)
     // 添加当前对话
-    messages.push({ role: 'user', content: prompt })
-    let payload = messages.map(msg => msg.role + ':' + msg.content).join('\n')
+    const elements = h.parse(session.content)
+    const img = h.select(elements, 'img')
+    if (img.length > 0) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: img[0].attrs.src } },
+        ]
+      })
+    } else {
+      messages.push({ role: 'user', content: prompt })
+    }
+    let payload = messages.map(msg => msg.role + ':' + JSON.stringify(msg.content)).join('\n')
     if (this.config.log_system_prompt) logger.info(`系统提示：\n${payload}`)
     return messages
   }
