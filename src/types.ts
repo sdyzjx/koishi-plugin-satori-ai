@@ -96,10 +96,10 @@ export interface MiddlewareConfig {
   nick_name_list: string[]
   nick_name_block_words: string[]
   random_min_tokens: number
-  randnum: number
   max_tokens: number
   enable_warning: boolean
   warning_group: string
+  enable_auto_reply: boolean
 }
 
 // API配置
@@ -234,7 +234,6 @@ export namespace Sat {
     duplicateDialogueCheck: boolean
     enable_online_user_check: boolean
     random_min_tokens: number
-    randnum: number
     sentences_divide: boolean
     min_sentences_length: number
     max_sentences_length: number
@@ -298,6 +297,7 @@ export namespace Sat {
     enable_fencing: boolean
     enable_OneTouch: boolean
     cd_for_OneTouch: number
+    enable_auto_reply: boolean
   }
 
   export const Config: Schema<Config> = Schema.intersect([
@@ -381,12 +381,12 @@ export namespace Sat {
       duplicateDialogueCheck: Schema.boolean().default(true).description('是否检查重复对话'),
       enable_online_user_check: Schema.boolean().default(true).description('在未回答而再次提问时是否提示用户有未完成的对话'),
       random_min_tokens: Schema.number().default(20).description('随机触发对话的最小长度'),
-      randnum: Schema.number().role('slider').min(0).max(1).step(0.01).default(0).description('在群聊中随机触发对话的概率，如需关闭可设置为 0'),
       sentences_divide: Schema.boolean().default(true).description('是否分句发送'),
       min_sentences_length: Schema.number().default(10).description('每个分句的最小长度'),
       max_sentences_length: Schema.number().default(20).description('每个分句的最大长度'),
       time_interval: Schema.number().default(1000).description('每句话的时间间隔'),
       reply_pointing: Schema.boolean().default(true).description('是否在与多人同时对话时显示回复指向'),
+      enable_auto_reply: Schema.boolean().default(false).description('是否开启自动回复（当消息与AI无关时，由非深度思考模型判断是否回复）'),
     }).description('对话设置'),
 
     Schema.object({

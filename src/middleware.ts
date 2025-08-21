@@ -2,7 +2,6 @@
 import { Context, Session, Next, Logger } from 'koishi'
 import { } from '@koishijs/censor'
 import { SAT } from './index'
-import { probabilisticCheck } from './utils'
 import { FavorabilityConfig, MiddlewareConfig } from './types'
 import { ensureUserExists } from './database'
 
@@ -29,9 +28,9 @@ export function createMiddleware(
       return await handleNickNameMessage(sat, session)
     }
 
-    // 随机触发处理
-    if (shouldRandomTrigger(session, config)) {
-      return await sat.handleRandomMiddleware(session, session.content)
+    // 自动回复处理
+    if (config.enable_auto_reply && await shouldAutoReply(sat, session, config)) {
+      return await sat.handleAutoReplyMiddleware(session, session.content)
     }
 
     return next()
@@ -68,18 +67,22 @@ async function handleNickNameMessage(SAT: SAT, session: Session) {
   if (content) return await SAT.handleNickNameMiddleware(session, content)
 }
 
-// 随机触发判断
-function shouldRandomTrigger(
+// 自动回复判断
+async function shouldAutoReply(
+  sat: SAT,
   session: Session,
   config: MiddlewareConfig
-): boolean {
+): Promise<boolean> {
   const { content } = session
-  return (
-    !isSpecialMessage(session) &&
-    content.length >= config.random_min_tokens &&
-    content.length < config.max_tokens &&
-    probabilisticCheck(config.randnum)
-  )
+  if (
+    isSpecialMessage(session) ||
+    content.length < config.random_min_tokens ||
+    content.length >= config.max_tokens
+  ) {
+    return false
+  }
+
+  return await sat.shouldReplyToChannelMessage(session);
 }
 
 // 特殊消息类型判断

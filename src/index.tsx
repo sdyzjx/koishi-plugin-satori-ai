@@ -111,7 +111,6 @@ export class SAT extends Sat {
         nick_name_block_words: this.config.nick_name_block_words,
         max_favorability_perday: this.config.max_favorability_perday,
         random_min_tokens: this.config.random_min_tokens,
-        randnum: this.config.randnum,
         max_tokens: this.config.max_tokens,
         enable_favorability: this.config.enable_favorability,
         dataDir: this.config.dataDir,
@@ -133,6 +132,7 @@ export class SAT extends Sat {
         prompt_5: this.config.prompt_5,
         enable_warning: this.config.enable_warning,
         warning_group: this.config.warning_group,
+        enable_auto_reply: this.config.enable_auto_reply,
       }
   }
   private getFavorabilityConfig(): FavorabilityConfig {
@@ -602,8 +602,8 @@ export class SAT extends Sat {
     return result
   }
 
-  // 随机中间件转接
-  public async handleRandomMiddleware(session: Session, prompt: string) {
+  // 自动回复中间件转接
+  public async handleAutoReplyMiddleware(session: Session, prompt: string) {
     const user = await getUser(this.ctx, session.userId)
     const processedPrompt = processPrompt(session.content)
     if (this.performPreChecks(session, processedPrompt)) return null
@@ -633,6 +633,31 @@ export class SAT extends Sat {
     if (this.ctx.censor) censored = await this.ctx.censor.transform(processedPrompt, session)
     this.memoryManager.updateChannelDialogue(session, censored, session.username)
     return null
+  }
+
+  public async shouldReplyToChannelMessage(session: Session): Promise<boolean> {
+    const dialogues = this.memoryManager.getChannelContext(this.config.personal_memory ? session.userId : session.channelId);
+
+    if (!dialogues || dialogues.length === 0) {
+      return false;
+    }
+
+    const recentDialogues = dialogues.slice(-this.config.channel_dialogues_max_length);
+    const user = await ensureUserExists(this.ctx, session.userId, session.username);
+
+    const messages: Sat.Msg[] = [
+      {
+        role: 'system',
+        content: '判断是否应回复最新消息。如果是闲聊，或者互相逗趣调侃，或者是对之前关于你的话题的延续，回复“yes”。若是关于诸如约定时间地点集合之类的具体的现实生活中的事件的讨论，回复“no”。',
+      },
+      {
+        role: 'user',
+        content: recentDialogues.map(d => `${d.role}: ${typeof d.content === 'string' ? d.content : JSON.stringify(d.content)}`).join('\n'),
+      },
+    ];
+
+    const response = await this.apiClient.chat(user, messages, this.config.not_reasoner_LLM);
+    return response.content.toLowerCase().includes('yes');
   }
 }
 
