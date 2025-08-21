@@ -29,7 +29,7 @@ export function createMiddleware(
     }
 
     // 自动回复处理
-    if (config.enable_auto_reply && await shouldAutoReply(sat, session, config)) {
+    if (await shouldAutoReply(sat, session, config)) {
       return await sat.handleAutoReplyMiddleware(session, session.content)
     }
 
@@ -67,21 +67,18 @@ async function handleNickNameMessage(SAT: SAT, session: Session) {
   if (content) return await SAT.handleNickNameMiddleware(session, content)
 }
 
-// 自动回复判断
+// 自动回复前置判断
 async function shouldAutoReply(
   sat: SAT,
   session: Session,
   config: MiddlewareConfig
 ): Promise<boolean> {
-  const { content } = session
-  if (
-    isSpecialMessage(session) ||
-    content.length < config.random_min_tokens ||
-    content.length >= config.max_tokens
-  ) {
+  // 如果未开启功能、是特殊消息或超出token限制，则直接跳过
+  if (!config.enable_auto_reply || isSpecialMessage(session) || session.content.length > config.max_tokens) {
     return false
   }
 
+  // 交给核心函数使用 LLM 判断
   return await sat.shouldReplyToChannelMessage(session);
 }
 

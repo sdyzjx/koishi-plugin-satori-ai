@@ -110,7 +110,6 @@ export class SAT extends Sat {
         nick_name_list: this.config.nick_name_list,
         nick_name_block_words: this.config.nick_name_block_words,
         max_favorability_perday: this.config.max_favorability_perday,
-        random_min_tokens: this.config.random_min_tokens,
         max_tokens: this.config.max_tokens,
         enable_favorability: this.config.enable_favorability,
         dataDir: this.config.dataDir,
@@ -642,22 +641,32 @@ export class SAT extends Sat {
       return false;
     }
 
-    const recentDialogues = dialogues.slice(-this.config.channel_dialogues_max_length);
+    const recentDialogues = dialogues.slice(-this.config.auto_reply_max_messages);
     const user = await ensureUserExists(this.ctx, session.userId, session.username);
+    const userContent = recentDialogues.map(d => `${d.role}: ${typeof d.content === 'string' ? d.content : JSON.stringify(d.content)}`).join('\n')
 
     const messages: Sat.Msg[] = [
       {
         role: 'system',
-        content: '判断是否应回复最新消息。如果是闲聊，或者互相逗趣调侃，或者是对之前关于你的话题的延续，回复“yes”。若是关于诸如约定时间地点集合之类的具体的现实生活中的事件的讨论，回复“no”。',
+        content: this.config.auto_reply_prompt,
       },
       {
         role: 'user',
-        content: recentDialogues.map(d => `${d.role}: ${typeof d.content === 'string' ? d.content : JSON.stringify(d.content)}`).join('\n'),
+        content: userContent,
       },
     ];
 
-    const response = await this.apiClient.chat(user, messages, this.config.not_reasoner_LLM);
-    return response.content.toLowerCase().includes('yes');
+    logger.info(`[自动回复判断] 发送以下内容进行判断:\n${userContent}`);
+
+    try {
+      const response = await this.apiClient.chat(user, messages, this.config.not_reasoner_LLM);
+      const decision = response.content.toLowerCase().includes('yes');
+      logger.info(`[自动回复判断] 模型原始回复: "${response.content.trim()}" | 最终决定: ${decision}`);
+      return decision;
+    } catch (error) {
+      logger.error('[自动回复判断] 请求失败:', error);
+      return false; // 发生错误时，默认不回复
+    }
   }
 }
 

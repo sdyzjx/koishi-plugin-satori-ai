@@ -95,11 +95,10 @@ export interface MiddlewareConfig {
   nick_name: boolean
   nick_name_list: string[]
   nick_name_block_words: string[]
-  random_min_tokens: number
   max_tokens: number
   enable_warning: boolean
   warning_group: string
-  enable_auto_reply: boolean
+  enable_auto_reply: boolean
 }
 
 // API配置
@@ -233,13 +232,15 @@ export namespace Sat {
     reasoner_filter_word: string
     duplicateDialogueCheck: boolean
     enable_online_user_check: boolean
-    random_min_tokens: number
     sentences_divide: boolean
     min_sentences_length: number
     max_sentences_length: number
     time_interval: number
     max_parallel_count: number
     reply_pointing: boolean
+    enable_auto_reply: boolean
+    auto_reply_prompt: string
+    auto_reply_max_messages: number
 
     enable_mood: boolean
     max_mood: number
@@ -297,7 +298,6 @@ export namespace Sat {
     enable_fencing: boolean
     enable_OneTouch: boolean
     cd_for_OneTouch: number
-    enable_auto_reply: boolean
   }
 
   export const Config: Schema<Config> = Schema.intersect([
@@ -380,13 +380,14 @@ export namespace Sat {
       .description('返回内容过滤词，使用“-”分隔，在括号内且含有过滤词的那一句会被过滤，用于缓解思维链溢出问题'),
       duplicateDialogueCheck: Schema.boolean().default(true).description('是否检查重复对话'),
       enable_online_user_check: Schema.boolean().default(true).description('在未回答而再次提问时是否提示用户有未完成的对话'),
-      random_min_tokens: Schema.number().default(20).description('随机触发对话的最小长度'),
       sentences_divide: Schema.boolean().default(true).description('是否分句发送'),
       min_sentences_length: Schema.number().default(10).description('每个分句的最小长度'),
       max_sentences_length: Schema.number().default(20).description('每个分句的最大长度'),
       time_interval: Schema.number().default(1000).description('每句话的时间间隔'),
       reply_pointing: Schema.boolean().default(true).description('是否在与多人同时对话时显示回复指向'),
       enable_auto_reply: Schema.boolean().default(false).description('是否开启自动回复（当消息与AI无关时，由非深度思考模型判断是否回复）'),
+      auto_reply_prompt: Schema.string().role('textarea').default('你需要扮演一个对话分析助手。分析以下对话，判断我是否应该回复最后一条消息。如果消息是向我提问、寻求帮助或我可以提供有价值的补充，就回复“yes”，否则回复“no”。仅回答“yes”或“no”，不要有其他内容。').description('自动回复的判断提示词'),
+      auto_reply_max_messages: Schema.number().default(5).description('自动回复判断时，向模型发送的最近消息条数。'),
     }).description('对话设置'),
 
     Schema.object({
