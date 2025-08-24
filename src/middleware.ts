@@ -1,89 +1,43 @@
 // src/middleware.ts
-import { Context, Session, Next, Logger } from 'koishi'
-import { } from '@koishijs/censor'
+import { Context, Session } from 'koishi'
 import { SAT } from './index'
-import { probabilisticCheck } from './utils'
-import { FavorabilityConfig, MiddlewareConfig } from './types'
-import { ensureUserExists } from './database'
+import { MiddlewareConfig, FavorabilityConfig } from './types'
+import { processPrompt } from './utils'
+import { getUser } from './database'
 
-const logger = new Logger('satori-ai-middleware')
+export function createMiddleware(ctx: Context, sat: SAT, config: MiddlewareConfig & FavorabilityConfig) {
+  return async (session: Session, next: () => Promise<void>) => {
+    // 這個中介軟體現在只關心是否要觸發 AI 回覆。
 
-export function createMiddleware(
-  ctx: Context,
-  sat: SAT,
-  config: MiddlewareConfig & FavorabilityConfig,
-) {
-  return async (session: Session, next: Next) => {
-    if (config.enable_favorability && config.enable_warning && session.channelId === config.warning_group)
-      sat.getWarningList(session)
-    await sat.broadcastManager.seedBroadcast(session)
-    if (!isSpecialMessage(session)) await sat.handleChannelMemoryManager(session)
-
-    // 私信处理
-    if (config.private && isPrivateSession(session)) {
-      return await handlePrivateMessage(sat, session)
+    // 隨機回覆邏輯
+    const isPrivate = session.isDirect;
+    if (config.randnum > 0 && !isPrivate && Math.random() < config.randnum && session.content.length > config.random_min_tokens) {
+      return sat.handleRandomMiddleware(session, session.content);
     }
 
-    // 昵称处理
-    if (config.nick_name && await hasNickName(ctx, session, config)) {
-      return await handleNickNameMessage(sat, session)
+    // 暱稱觸發邏輯
+    if (config.nick_name && !isPrivate) {
+      const user = await getUser(ctx, session.userId)
+      const nickName = user.items['情侶合照']?.metadata?.userNickName || ''
+      const nickNameList = [...config.nick_name_list]
+      if (nickName) nickNameList.push(nickName)
+      
+      const prompt = processPrompt(session.content);
+      const isAt = session.elements.some(e => e.type === 'at' && e.attrs.id === session.bot.selfId);
+      const hasNick = nickNameList.some(name => prompt.includes(name));
+
+      if ((isAt || hasNick) && !config.nick_name_block_words.some(word => prompt.includes(word))) {
+        return sat.handleNickNameMiddleware(session, prompt);
+      }
     }
 
-    // 随机触发处理
-    if (shouldRandomTrigger(session, config)) {
-      return await sat.handleRandomMiddleware(session, session.content)
+    // 私聊邏輯
+    if (config.private && isPrivate) {
+      const prompt = processPrompt(session.content);
+      return sat.handleNickNameMiddleware(session, prompt);
     }
 
-    return next()
+    // 如果以上條件都不滿足，則交給下一個中介軟體或指令處理
+    return next();
   }
-}
-
-// 私聊会话判断
-function isPrivateSession(session: Session): boolean {
-  if (isSpecialMessage(session)) return false
-  return session.subtype === 'private' || session.channelId.includes('private')
-}
-
-// 处理私聊消息
-async function handlePrivateMessage(SAT: SAT, session: Session) {
-  const content = session.content.trim()
-  if (content) return await SAT.handleNickNameMiddleware(session, content)
-}
-
-// 昵称判断
-async function hasNickName(ctx: Context, session: Session, config: MiddlewareConfig): Promise<boolean> {
-  if (session.userId === session.selfId) return false
-  if (config.nick_name_block_words.some(word => session.content.includes(word))) return false
-  const user = await ensureUserExists(ctx, session.userId, session.username)
-  let names = config.nick_name_list
-  if (user?.items?.['情侣合照']?.metadata?.botNickName){
-    names = names.concat(user.items['情侣合照'].metadata.botNickName)
-  }
-  return names.some(name => session.content.includes(name))
-}
-
-// 处理昵称消息
-async function handleNickNameMessage(SAT: SAT, session: Session) {
-  const content = session.content.trim()
-  if (content) return await SAT.handleNickNameMiddleware(session, content)
-}
-
-// 随机触发判断
-function shouldRandomTrigger(
-  session: Session,
-  config: MiddlewareConfig
-): boolean {
-  const { content } = session
-  return (
-    !isSpecialMessage(session) &&
-    content.length >= config.random_min_tokens &&
-    content.length < config.max_tokens &&
-    probabilisticCheck(config.randnum)
-  )
-}
-
-// 特殊消息类型判断
-function isSpecialMessage(session: Session): boolean {
-  const firstElement = session.elements[0]
-  return ['at', 'file'].includes(firstElement?.type) || session.content.includes(':poke') || session.content.includes('file://') || session.content.includes('http://') || session.content.includes('https://')
 }

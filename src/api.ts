@@ -43,12 +43,12 @@ export class APIClient {
       baseURL = ticket?.baseURL
       const not_reasoner_model = ticket?.not_reasoner_model
       const length = ticket?.use_not_reasoner_LLM_length
-      if (not_reasoner_model && length && messages[messages.length - 1].content.length <= length)
+      if (not_reasoner_model && length && typeof lastMessage.content === 'string' && lastMessage.content.length <= length)
         model = not_reasoner_model
     } else {
       // 原有文本模型逻辑
       const config = this.config;
-      const useNotReasoner = messages[messages.length - 1].content.length <= config.use_not_reasoner_LLM_length;
+      const useNotReasoner = typeof lastMessage.content === 'string' && lastMessage.content.length <= config.use_not_reasoner_LLM_length;
       keys = useNotReasoner ? config.not_reasoner_LLM_key : config.keys;
       model = useNotReasoner ? config.not_reasoner_LLM : config.appointModel;
       baseURL = useNotReasoner ? config.not_reasoner_LLM_URL : config.baseURL;
@@ -57,6 +57,7 @@ export class APIClient {
     const payload = this.createPayload(messages, model)
     for (let i = 0; i < keys.length; i++) {
       try {
+        if (hasImage) logger.info('发送包含图片的信息到视觉处理模型...');
         return await this.tryRequest(baseURL, payload, keys)
       } catch (error) {
         if (i == keys.length - 1) {

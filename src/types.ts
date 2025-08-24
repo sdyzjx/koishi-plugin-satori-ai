@@ -1,3 +1,4 @@
+// src/types.ts
 import { Context, Schema, Service } from 'koishi'
 export const usage = `使用说明见插件主页`;
 
@@ -68,7 +69,10 @@ export type FavorabilityLevel = '厌恶' | '陌生' | '朋友' | '暧昧' | '恋
 //记忆配置
 export interface MemoryEntry {
   role: string
-  content: string
+  content: string | (
+    | { type: 'text'; text: string }
+    | { type: 'image_url'; image_url: { url: string } }
+  )[]
 }
 export interface ChannelMemory {
   dialogues: MemoryEntry[]
@@ -165,7 +169,6 @@ export namespace Sat {
     role: string
     // 修改 content 类型以支持多模态
     content: string | (
-      | string
       | { type: 'text'; text: string }
       | { type: 'image_url'; image_url: { url: string } }
     )[]

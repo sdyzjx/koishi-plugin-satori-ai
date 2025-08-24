@@ -56,8 +56,16 @@ export class SAT extends Sat {
     this.moodManager = new MoodManager(ctx, config)
     this.broadcastManager = new BroadcastManager(ctx, config)
     ensureCensorFileExists(this.config.dataDir)
-    // 注册中间件
+
+    // 註冊獨立的、高優先順序的記憶體中介軟體
+    ctx.middleware(async (session, next) => {
+      await next();
+      await this.handleChannelMemoryManager(session);
+    }, true)
+
+    // 註冊用於處理 AI 回覆邏輯的常規中介軟體
     ctx.middleware(createMiddleware(ctx, this, this.getMiddlewareConfig()))
+    
     // 注册命令
     this.registerCommands(ctx)
     if (this.config.enable_game) this.game = new Game(ctx, config, this)
@@ -81,7 +89,6 @@ export class SAT extends Sat {
       frequency_penalty: this.config.frequency_penalty,
       presence_penalty: this.config.presence_penalty,
       reasoning_content: this.config.log_reasoning_content,
-      // 传入视觉模型配置
       vision_LLM_URL: this.config.vision_LLM_URL,
       vision_LLM_key: this.config.vision_LLM_key,
       vision_LLM: this.config.vision_LLM,
@@ -213,41 +220,36 @@ export class SAT extends Sat {
 
   private async handleSatCommand(session: Session, prompt: string) {
     const user = await ensureUserExists(this.ctx, session.userId, session.username)
-    // 处理输入
     const processedPrompt = await this.processInput(session, prompt)
-    // 好感度阻断检查
     const favorabilityBlock = await this.checkFavorabilityBlock(session)
     if (favorabilityBlock) return favorabilityBlock
-    // 前置检查
+    
     const preCheckResult = this.performPreChecks(session, processedPrompt)
-    if (preCheckResult) return preCheckResult
-    // 重复对话检查
+    if (preCheckResult) {
+        logger.info(`[PreCheck] 訊息被前置檢查攔截: ${preCheckResult}`);
+        return;
+    }
+    
     const channelId = this.config.enable_self_memory ? session.userId : session.channelId
     const recentDialogues = this.memoryManager.getChannelMemory(channelId).slice(-10)
     const duplicateCheck = await this.checkDuplicateDialogue(session, processedPrompt, recentDialogues, user)
     if (duplicateCheck) return duplicateCheck
-    // 固定对话处理
     const fixedResponse = await this.handleFixedDialoguesCheck(session, user, processedPrompt)
     if (fixedResponse) return fixedResponse
-    // 对话次数检查
     const dialogueCountCheck = await this.checkUserDialogueCount(session, user)
     if (dialogueCountCheck) return dialogueCountCheck
-    // 更新频道并发数
     await this.updateChannelParallelCount(session, 1)
-    // 生成回复
     const response = await this.generateResponse(session, processedPrompt)
     const auxiliaryResult = await this.handleAuxiliaryDialogue(session, processedPrompt, response)
-    // 更新记忆
-    await this.memoryManager.updateMemories(session, processedPrompt, this.getMemoryConfig(), response)
-    // 更新用户p
+    if (!response.error) {
+        await this.memoryManager.updateMemories(session, processedPrompt, response);
+    }
     if (!response.error) await updateUserPWithTicket(this.ctx, user, 10)
-    // 更新用户画像
     if (user.usage == this.config.portrait_usage - 1)
       this.portraitManager.generatePortrait(session, user, this.apiClient)
     return await this.formatResponse(session, response.content, auxiliaryResult)
   }
 
-  // 处理辅助判断
   private async handleAuxiliaryDialogue(session: Session, prompt: string, response: { content: string, error: boolean}) {
     if (response.error || !this.config.enable_favorability) return null
     const user = await getUser(this.ctx, session.userId)
@@ -270,25 +272,27 @@ export class SAT extends Sat {
     return null
   }
 
-  // 好感度阻断检查
   private async checkFavorabilityBlock(session: Session): Promise<string | void> {
     if (!this.config.enable_favorability) return null
     return await handleFavorabilitySystem(this.ctx, session, this.getFavorabilityConfig())
   }
 
-  // 前置检查
   private performPreChecks(session: Session, prompt: string): string {
-    const hasImage = session.elements.some(el => el.type === 'img');
-    if (!prompt && !hasImage)
-      return session.text('commands.sat.messages.no-prompt')
+    const hasMeaningfulText = session.elements.some(el => el.type === 'text' && el.attrs.content.trim().length > 0);
+
+    if (!hasMeaningfulText) {
+      return '純圖片或無有效文字，僅記錄，不觸發回應。';
+    }
+    
     if (prompt.length > this.config.max_tokens)
       return session.text('commands.sat.messages.tooLong')
+
     if (this.onlineUsers.includes(session.userId) && this.config.enable_online_user_check)
       return session.text('commands.sat.messages.online')
+      
     return null
   }
 
-  // 重复对话检查
   private async checkDuplicateDialogue(session: Session, prompt: string, recentDialogues: Sat.Msg[], user: User): Promise<string> {
     if (!this.config.duplicateDialogueCheck) return null
     if (session.content == '戳戳') return null
@@ -302,7 +306,6 @@ export class SAT extends Sat {
     return session.text('commands.sat.messages.duplicate-dialogue')
   }
 
-  // 处理固定对话
   private async handleFixedDialoguesCheck(session: Session, user: User, prompt: string): Promise<string | void> {
     const fixedDialogues = await handleFixedDialogues(this.ctx, session, user, prompt, {
         dataDir: this.config.dataDir,
@@ -314,7 +317,6 @@ export class SAT extends Sat {
     return null
   }
 
-  // 对话次数检查
   private async checkUserDialogueCount(session: Session, user: User, adjustment: number = 1): Promise<string | void> {
     const usage = await updateUserUsage(this.ctx, user, adjustment)
     if (user?.items?.['地灵殿通行证']?.description && user.items['地灵殿通行证'].description === 'on')
@@ -327,26 +329,21 @@ export class SAT extends Sat {
     return null
   }
 
-  // 更新频道并发数
   private async updateChannelParallelCount(session: Session, value: number): Promise<void> {
-    // 更新在线用户
     this.onlineUsers.push(session.userId)
     this.ChannelParallelCount.set(session.channelId, (this.ChannelParallelCount.get(session.channelId) || 0) + value)
   }
-  // 获取频道并发数
+
   private getChannelParallelCount(session: Session): number {
     return this.ChannelParallelCount.get(session.channelId) || 0
   }
 
-  // 处理输入
   private async processInput(session: Session, prompt: string) {
     const processedPrompt = processPrompt(prompt)
-    // 敏感词处理
     let censored = processedPrompt
     if (this.ctx.censor) {
       censored = await this.ctx.censor.transform(processedPrompt, session)
     }
-    // 好感度检查
     if (this.config.enable_favorability) {
       await inputContentCheck(this.ctx, censored, session.userId, this.getFavorabilityConfig(), session, this.moodManager)
     }
@@ -354,7 +351,6 @@ export class SAT extends Sat {
     return censored
   }
 
-  // 生成回复
   public async generateResponse(session: Session, prompt: string) {
     if (this.getChannelParallelCount(session) > this.config.max_parallel_count) {
       logger.info(`频道 ${session.channelId} 并发数过高(${this.getChannelParallelCount(session)})，${session.username}等待中...`)
@@ -373,7 +369,6 @@ export class SAT extends Sat {
     return response
   }
 
-  // 获取聊天回复
   public async getChatResponse(user: User, messages: Sat.Msg[]): Promise<{ content: string; error: boolean }> {
     let response = await this.apiClient.chat(user, messages)
     if (this.config.log_ask_response){
@@ -387,43 +382,75 @@ export class SAT extends Sat {
     return response
   }
 
-  // 构建消息
   private async buildMessages(session: Session, prompt: string) {
     const messages: Sat.Msg[] = []
     const example = `<think>
 好的，我会尽量做到的
 </think>
 <p>已明确对话要求</p>`
-    // 添加人格设定
     if (this.config.no_system_prompt) {
       messages.push({ role: 'user', content: await this.buildSystemPrompt(session, prompt) })
       messages.push({ role: 'assistant', content: example })
     } else {
       messages.push({ role: 'system', content: await this.buildSystemPrompt(session, prompt) })
     }
-    // 添加上下文记忆
     const userMemory = this.memoryManager.getChannelContext(this.config.personal_memory ? session.userId : session.channelId)
-    messages.push(...userMemory)
-    // 添加当前对话
-    const elements = h.parse(session.content)
-    const img = h.select(elements, 'img')
-    if (img.length > 0) {
-      messages.push({
-        role: 'user',
-        content: [
-          { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: img[0].attrs.src } },
-        ]
-      })
+
+    const processedMemory = userMemory.map(msg => {
+        if (Array.isArray(msg.content)) {
+            const textContent = msg.content.find(c => c.type === 'text') as { type: 'text'; text: string };
+            return { ...msg, content: (textContent?.text || '') + ' [图片]' };
+        }
+        return msg;
+    });
+
+    messages.push(...processedMemory)
+
+    let imageUrlToProcess: string | null = null;
+    const imageElementInCurrentSession = session.elements.find(el => el.type === 'img');
+
+    if (imageElementInCurrentSession) {
+        imageUrlToProcess = imageElementInCurrentSession.attrs.src;
     } else {
-      messages.push({ role: 'user', content: prompt })
+        for (let i = userMemory.length - 1; i >= 0; i--) {
+            const msg = userMemory[i];
+            if (Array.isArray(msg.content)) {
+                const imageContent = msg.content.find(c => c.type === 'image_url') as { type: 'image_url'; image_url: { url: string } };
+                if (imageContent) {
+                    imageUrlToProcess = imageContent.image_url.url;
+                    break;
+                }
+            }
+        }
     }
+
+    if (imageUrlToProcess) {
+        try {
+            const imageData = await this.ctx.http.get(imageUrlToProcess, { responseType: 'arraybuffer' });
+            const base64 = Buffer.from(imageData).toString('base64');
+            const mimeType = imageUrlToProcess.includes('.png') ? 'image/png' : imageUrlToProcess.includes('.gif') ? 'image/gif' : 'image/jpeg';
+            const dataUri = `data:${mimeType};base64,${base64}`;
+
+            messages.push({
+                role: 'user',
+                content: [
+                    { type: 'text', text: prompt },
+                    { type: 'image_url', image_url: { url: dataUri } },
+                ]
+            });
+        } catch (error) {
+            logger.error('處理圖片時發生錯誤，僅傳送文字:', error);
+            messages.push({ role: 'user', content: prompt });
+        }
+    } else {
+        messages.push({ role: 'user', content: prompt });
+    }
+
     let payload = messages.map(msg => msg.role + ':' + JSON.stringify(msg.content)).join('\n')
     if (this.config.log_system_prompt) logger.info(`系统提示：\n${payload}`)
     return messages
   }
 
-  // 构建系统提示
   private async buildSystemPrompt(session: Session, prompt: string): Promise<string> {
     const commonSense = await this.memoryManager.searchMemories(session, prompt, 'common')
     const channelDialogue = await this.memoryManager.getChannelDialogue(session)
@@ -448,20 +475,18 @@ export class SAT extends Sat {
       if (clothes) systemPrompt += `\n##你当前的穿着(你可以根据穿着进行对应的行为)：${clothes}\n`
     }
 
-    // 添加好感度提示
     if (this.config.enable_favorability) {
       const favorabilityLevel = getFavorabilityLevel(user, this.getFavorabilityConfig())
       if (this.config.enable_mood) {
         if ((moodLevel == 'normal' || moodLevel == 'happy') || favorabilityLevel == '厌恶')
           systemPrompt += '\n##' + generateLevelPrompt(favorabilityLevel, this.getFavorabilityConfig(), user)
         const moodPrompt = this.moodManager.generateMoodPrompt(user.userid)
-        systemPrompt += `\n##${moodPrompt}\n` // 添加心情提示
+        systemPrompt += `\n##${moodPrompt}\n`
       } else {
         systemPrompt += '\n##' + generateLevelPrompt(favorabilityLevel, this.getFavorabilityConfig(), user)
       }
     }
 
-    // 添加用户名
     systemPrompt += `\n##用户的名字是：${session.username}`
     const nickName = user.items['情侣合照']?.metadata?.userNickName
     if (nickName) systemPrompt += `, 昵称是：${nickName},称呼用户时请优先使用昵称\n`
@@ -471,7 +496,6 @@ export class SAT extends Sat {
     return systemPrompt
   }
 
-  // 思考提示
   private getThinkingPrompt(user: User, prompt: string): string {
     const reasonerPrompt = this.config.reasoner_prompt
     const promptForNoReasoner = `#请你在回复时先进行分析思考，并且模仿思维链的模式输出思考内容，${reasonerPrompt};
@@ -487,7 +511,6 @@ export class SAT extends Sat {
     return reasonerText
   }
 
-  // 处理回复
   private async formatResponse(session: Session, response: string, auxiliaryResult: string | void) {
     const user = await getUser(this.ctx, session.userId)
     this.updateChannelParallelCount(session, -1)
@@ -547,7 +570,6 @@ export class SAT extends Sat {
     return
   }
 
-  // 清空会话
   private clearSession(session: Session, global: boolean) {
     if (global) {
       this.memoryManager.clearAllMemories()
@@ -563,7 +585,6 @@ export class SAT extends Sat {
     return session.text('commands.sat.clear.messages.clean')
   }
 
-  // 添加常识
   private async addCommonSense(session: Session, content: string) {
     if (!content) return session.text('commands.sat.common_sense.messages.no-prompt')
     const filePath = path.join(this.config.dataDir, 'common_sense.txt')
@@ -574,7 +595,6 @@ export class SAT extends Sat {
     return session.text('commands.sat.common_sense.messages.succeed', [content]);
   }
 
-  // 更新用户等级
   private async handleUserLevel(session: Session, options: { id?: string , level?: number }) {
     const userId = options.id || session.userId
     const user = await ensureUserExists(this.ctx, userId, session.username)
@@ -585,7 +605,6 @@ export class SAT extends Sat {
     return session.text('commands.sat.messages.update_level_succeed', [level])
   }
 
-  // 处理查询用户使用次数
   private async handleUserUsage(session: Session) {
     const user = await ensureUserExists(this.ctx, session.userId, session.username)
     const userUsage = user.usage || 0
@@ -602,21 +621,18 @@ export class SAT extends Sat {
     return result
   }
 
-  // 随机中间件转接
   public async handleRandomMiddleware(session: Session, prompt: string) {
     const user = await getUser(this.ctx, session.userId)
     const processedPrompt = processPrompt(session.content)
     if (this.performPreChecks(session, processedPrompt)) return null
     if (await this.checkUserDialogueCount(session, user, 0)) return null
     if (await this.checkFavorabilityBlock(session)) return null
-    // 敏感词处理
     let censored = processedPrompt
     if (this.ctx.censor) censored = await this.ctx.censor.transform(processedPrompt, session)
     if (censored.includes('**')) return null
     return this.handleSatCommand(session, prompt)
   }
 
-  // 昵称中间件转接
   public async handleNickNameMiddleware(session: Session, prompt: string) {
     const user = await getUser(this.ctx, session.userId)
     if (await this.checkUserDialogueCount(session, user, 0)) return null
@@ -624,15 +640,24 @@ export class SAT extends Sat {
     return this.handleSatCommand(session, prompt)
   }
 
-  // 频道记忆中间件转接
   public async handleChannelMemoryManager(session: Session): Promise<void> {
-    const processedPrompt = processPrompt(session.content)
-    if (this.performPreChecks(session, processedPrompt)) return null
-    // 敏感词处理
-    let censored = processedPrompt
-    if (this.ctx.censor) censored = await this.ctx.censor.transform(processedPrompt, session)
-    this.memoryManager.updateChannelDialogue(session, censored, session.username)
-    return null
+    logger.info(`[Memory Middleware] 觸發。頻道ID: ${session.channelId}, 使用者ID: ${session.userId}`);
+    logger.info(`[Memory Middleware] 原始訊息內容: ${session.content}`);
+    
+    if (!session || !session.content) {
+        logger.warn(`[Memory Middleware] 無效的 session 或空的 content，跳過記錄。`);
+        return;
+    }
+
+    const processedPrompt = processPrompt(session.content);
+
+    let censored = processedPrompt;
+    if (this.ctx.censor && censored) {
+      censored = await this.ctx.censor.transform(censored, session);
+    }
+    
+    logger.info(`[Memory Middleware] 訊息處理完成，呼叫 logUserMessage 進行記錄...`);
+    this.memoryManager.logUserMessage(session, censored, this.getMemoryConfig());
   }
 }
 

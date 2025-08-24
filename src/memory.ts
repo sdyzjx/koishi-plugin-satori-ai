@@ -1,39 +1,108 @@
 // src/memory.ts
-import { Session, Logger, Context } from 'koishi'
-import { MemoryEntry, MemoryConfig, ChannelMemory } from './types'
+import { Session, Logger, Context, h } from 'koishi'
+import { MemoryEntry, MemoryConfig, ChannelMemory, Sat } from './types'
 import * as fs from 'fs'
 import * as path from 'path'
 import { countCommonChars, escapeRegExp, findLongestCommonSubstring, getTimeOfDay } from './utils'
 import { getUser } from './database'
 
 const logger = new Logger('satori-memory')
+
 export class MemoryManager {
   private channelMemories: Map<string, ChannelMemory> = new Map()
   private channelDialogues: Map<string, string[]> = new Map()
   private charactersToRemove: string[] = ["的", "一", "是", "了", "什", "么", "我", "谁", "不", "人", "在", "他", "有", "这", "个", "上", "们", "来", "到", "时", "大", "地", "为", "子", "中", "你", "说", "生", "国", "年", "着", "就", "那", "和", "要", "她", "出", "也", "得", "里", "后", "自", "以", "会", "id=", '1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
   private MAX_MEMORY_LENGTH = 5000
+
   constructor(
     private ctx: Context,
     private config: MemoryConfig
   ) {}
 
-  // 更新记忆
-  public async updateMemories(session: Session, prompt: string, config: MemoryConfig, response: {content:string, error: boolean}) {
-    if (response.error) return
-    // 更新短期记忆
-    this.updateChannelMemory(session, prompt, config, response.content)
-    // 添加当前时间
-    const date = ` (对话日期和时间：${new Date().toLocaleString()})`
-    // 保存长期记忆
-    const userFavourbility = (await getUser(this.ctx, session.userId)).favorability
-    if (this.shouldRemember(prompt, userFavourbility)) {
-      await this.saveLongTermMemory(session, [{
-        role: date,
-        content: prompt
-      }])
+  /**
+   * (新增) 僅記錄使用者訊息到短期記憶體。
+   * 這個函式應該由中介軟體在收到任何訊息時呼叫。
+   */
+  public logUserMessage(session: Session, prompt: string, config: MemoryConfig): void {
+    const channelId = config.personal_memory ? session.userId : session.channelId;
+    if (!this.channelMemories.has(channelId)) {
+      this.channelMemories.set(channelId, {
+        dialogues: [],
+        updatedAt: Date.now(),
+      });
+    }
+
+    const memory = this.channelMemories.get(channelId);
+    const elements = h.parse(session.content);
+    const img = h.select(elements, 'img');
+
+    // 判斷並儲存圖片
+    if (img.length > 0) {
+      logger.info(`[Memory] 在頻道 ${channelId} 中記錄到圖片訊息。`);
+      const content: Sat.Msg['content'] = [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: img[0].attrs.src } },
+      ];
+      memory.dialogues.push({ role: 'user', content });
+    } else {
+      memory.dialogues.push({ role: 'user', content: prompt });
+    }
+    
+    // 同時更新純文字的對話記錄
+    this.updateChannelDialogue(session, prompt, session.username);
+
+    // 保持記憶長度
+    if (memory.dialogues.length > this.config.message_max_length) {
+      memory.dialogues.splice(0, memory.dialogues.length - this.config.message_max_length);
     }
   }
 
+  /**
+   * (新增) 僅記錄 AI 的回覆到短期記憶體。
+   * 這個函式應該在 AI 生成回覆後呼叫。
+   */
+  public logAssistantResponse(session: Session, response: string, config: MemoryConfig): void {
+    if (!response) return;
+
+    const channelId = config.personal_memory ? session.userId : session.channelId;
+    const memory = this.channelMemories.get(channelId);
+    
+    // 如果該頻道的記憶體不存在，則不進行記錄
+    if (!memory) return;
+
+    let filteredResponse = this.bracketFilter(response, config);
+    filteredResponse = this.memoryFilter(filteredResponse, config);
+
+    if (this.config.enable_self_memory && filteredResponse) {
+      memory.dialogues.push({ role: 'assistant', content: '<p>' + filteredResponse + '</p>' });
+    }
+    
+    // 保持記憶長度
+    if (memory.dialogues.length > this.config.message_max_length) {
+      memory.dialogues.splice(0, memory.dialogues.length - this.config.message_max_length);
+    }
+  }
+
+  /**
+   * (重構) 更新 updateMemories 函式，使其專注於長期記憶和記錄 AI 回覆。
+   */
+  public async updateMemories(session: Session, prompt: string, response: { content: string; error: boolean }) {
+    if (response.error) return;
+
+    // 1. 記錄 AI 的回覆到短期記憶體
+    this.logAssistantResponse(session, response.content, this.config);
+
+    // 2. 判斷並儲存長期記憶
+    const userFavourbility = (await getUser(this.ctx, session.userId)).favorability;
+    if (this.shouldRemember(prompt, userFavourbility)) {
+      const date = ` (對話日期和時間：${new Date().toLocaleString()})`;
+      await this.saveLongTermMemory(session, [{
+        role: date,
+        content: prompt,
+      }]);
+    }
+  }
+  
   // 是否应当记忆
   private shouldRemember(content: string, userFavourbility: number): boolean {
     return (content.length >= this.config.remember_min_length || (content.includes('记住') && userFavourbility >= 50))
@@ -46,7 +115,7 @@ export class MemoryManager {
     if (!this.channelDialogues[session.channelId]) this.channelDialogues[session.channelId] = []
     this.channelDialogues[session.channelId].push('"' + name + '" 说: ' + prompt)
     if (this.channelDialogues[session.channelId]?.length > this.config.channel_dialogues_max_length) {
-      this.channelDialogues = this.channelDialogues[session.channelId].slice(-this.config.channel_dialogues_max_length)
+      this.channelDialogues[session.channelId] = this.channelDialogues[session.channelId].slice(-this.config.channel_dialogues_max_length)
     }
   }
 
@@ -95,39 +164,6 @@ export class MemoryManager {
     return result || content // 保留原内容如果过滤后为空
   }
 
-  // 更新短期记忆
-  private updateChannelMemory(session: Session, prompt: string, config: MemoryConfig, response?: string): void {
-    // 应用过滤
-    if (response) {
-      response = this.bracketFilter(response, config)
-      response = this.memoryFilter(response, config)
-    }
-
-    let channelId = session.channelId
-    if (config.personal_memory) channelId = session.userId
-    if (!this.channelMemories.has(channelId)) {
-      this.channelMemories.set(channelId, {
-        dialogues: [],
-        updatedAt: Date.now()
-      })
-    }
-
-    const memory = this.channelMemories.get(channelId)
-    memory.dialogues.push({ role: 'user', content: prompt })
-    this.updateChannelDialogue(session, prompt, session.username)
-
-    if (this.config.enable_self_memory && response) {
-      memory.dialogues.push({ role: 'assistant', content: '<p>' + response + '</p>' })
-    } else{
-      memory.dialogues.push({ role: 'assistant', content: '<p>…</p>' })
-    }
-
-    // 保持记忆长度
-    if (memory.dialogues.length > this.config.message_max_length) {
-      memory.dialogues = memory.dialogues.slice(-this.config.message_max_length)
-    }
-  }
-
   // 清除频道记忆
   public clearChannelMemory(channelId: string): void {
     this.channelMemories.delete(channelId)
@@ -151,7 +187,7 @@ export class MemoryManager {
     if (filePath === "") filePath = this.getUserMemoryPath(session.userId)
     await this.ensureMemoryFile(filePath)
 
-    const filtered = dialogues.filter(entry => !this.config.memory_block_words.some(word => entry.content.includes(word)))
+    const filtered = dialogues.filter(entry => !this.config.memory_block_words.some(word => typeof entry.content === 'string' && entry.content.includes(word)))
     if (filtered.length === 0) return
 
     const existing = await this.loadMemoryFile(filePath)
@@ -200,8 +236,16 @@ export class MemoryManager {
 
   // 记忆检索
   private findBestMatches(entries: MemoryEntry[], keywords: string[]): MemoryEntry[] {
+    const getContentText = (content: MemoryEntry['content']): string => {
+        if (typeof content === 'string') {
+            return content;
+        }
+        const textPart = content.find(c => c.type === 'text');
+        return textPart ? textPart.text : '';
+    };
+
     return entries
-      .map(entry => ({ entry, ...this.calculateMatchScore(entry.content, keywords) })) //计算匹配度
+      .map(entry => ({ entry, ...this.calculateMatchScore(getContentText(entry.content), keywords) })) //计算匹配度
       .filter(({ count }) => count > 1)    // 过滤低权重匹配
       .sort((a, b) => b.score - a.score)  // 按匹配率降序排列
       .map(({ entry }) => entry);         // 还原为原始条目
@@ -209,7 +253,7 @@ export class MemoryManager {
 
   // 匹配度计算
   private calculateMatchScore(content: string, keywords: string[]): { score: number; count: number } {
-    if (keywords.length === 0) return { score: 0, count: 0 };
+    if (!content || keywords.length === 0) return { score: 0, count: 0 };
 
     // 转义关键词并构建正则表达式
     const regex = new RegExp(`[${this.charactersToRemove.join('')}]`, 'g');
@@ -230,6 +274,14 @@ export class MemoryManager {
 
   // 格式化匹配结果
   private formatMatches(matched: MemoryEntry[], type: 'user' | 'common', topN = 5): string {
+    const getContentText = (content: MemoryEntry['content']): string => {
+        if (typeof content === 'string') {
+            return content;
+        }
+        const textPart = content.find(c => c.type === 'text');
+        return textPart ? textPart.text : '';
+    };
+
     const prefixMap = {
       'common': '这是你可能用到的信息：',
       'user': '以下是较久之前用户说过的话和对话时间：'
@@ -240,11 +292,11 @@ export class MemoryManager {
     if (matched.length > 0) {
       matched = matched.slice(0, topN < matched.length ? topN : matched.length)  // 取前 N 个结果
       if (type === 'common') {
-          const result = `${prefixMap[type]}{\n${matched.map(entry => entry.content).join('\n')} \n${date}\n}\n`
+          const result = `${prefixMap[type]}{\n${matched.map(entry => getContentText(entry.content)).join('\n')} \n${date}\n}\n`
           return result
       } else {
           // 这里因为远古屎山代码的原因，所以要判断role是否为user，现在的role是用来存储时间的
-          matched.forEach(entry => entry.content = entry.content + (entry.role === 'user' ? '(未记录时间)' : entry.role))
+          matched.forEach(entry => entry.content = getContentText(entry.content) + (entry.role === 'user' ? '(未记录时间)' : entry.role))
           const result = `${prefixMap[type]}{\n${matched.map(entry => entry.content).join('\n')}\n}\n`
           return result
       }
